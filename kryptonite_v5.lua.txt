@@ -1,0 +1,1082 @@
+-- // KRYPTONITE.WIN v5.0
+-- // Linoria UI | Kicia Ragebot (native, no UE) | Full feature set
+-- // Toggle: RightShift (desktop) or floating KYR button (mobile)
+-- // Rivals-compatible remote layout: UseItem / RegisterQuickAttack / UpdateCameraRotation
+
+-- ════════════════════════════════════════════════════════════════
+-- LINORIA LOAD
+-- ════════════════════════════════════════════════════════════════
+local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'
+local Library     = loadstring(game:HttpGet(repo .. 'Library.lua'))()
+local ThemeManager= loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
+local SaveManager = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+
+-- ════════════════════════════════════════════════════════════════
+-- SERVICES
+-- ════════════════════════════════════════════════════════════════
+local Players         = game:GetService("Players")
+local RunService      = game:GetService("RunService")
+local UserInputService= game:GetService("UserInputService")
+local ReplicatedStorage=game:GetService("ReplicatedStorage")
+local Lighting        = game:GetService("Lighting")
+local TweenService    = game:GetService("TweenService")
+local VirtualUser     = game:GetService("VirtualUser")
+local TeleportService = game:GetService("TeleportService")
+local HttpService     = game:GetService("HttpService")
+
+local lp     = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-- ════════════════════════════════════════════════════════════════
+-- EXECUTOR ENV HELPERS  (mirrors Kicia's K.fn pattern)
+-- ════════════════════════════════════════════════════════════════
+local env = getgenv and getgenv() or _G
+local function fn(name)
+    local v; pcall(function() v = env[name] end)
+    return type(v) == "function" and v or nil
+end
+
+local cloneref_         = fn("cloneref")         or function(x) return x end
+local sethiddenprop_    = fn("sethiddenproperty") or function() end
+local setthreadidentity_= fn("setthreadidentity") or fn("setidentity") or function() end
+local getconnections_   = fn("getconnections")    or function() return {} end
+local newcclosure_      = fn("newcclosure")       or function(f) return f end
+local mousemoverel_     = fn("mousemoverel")
+local hookfunction_     = fn("hookfunction")
+local getrenv_          = fn("getrenv")
+
+-- ════════════════════════════════════════════════════════════════
+-- REMOTES  (Rivals path; waits up to 8s each)
+-- ════════════════════════════════════════════════════════════════
+local Remotes = {}
+local function tryGet(...)
+    local path = {...}
+    local ok, res = pcall(function()
+        local node = cloneref_(ReplicatedStorage)
+        for _, p in ipairs(path) do
+            node = node:WaitForChild(p, 8)
+            if not node then return nil end
+            node = cloneref_(node)
+        end
+        return node
+    end)
+    return ok and res or nil
+end
+
+local function fireRemote(remote, ...)
+    if not remote then return end
+    pcall(function() remote:FireServer(...) end)
+end
+
+task.spawn(function()
+    Remotes.UseItem      = tryGet("Remotes","Replication","Fighter","UseItem")
+    Remotes.QuickAttack  = tryGet("Remotes","Replication","Fighter","RegisterQuickAttack")
+    Remotes.CamRot       = tryGet("Remotes","Replication","Fighter","UpdateCameraRotation")
+    print("[KYR v5] remotes →",
+        "UseItem:", Remotes.UseItem ~= nil,
+        "| QuickAttack:", Remotes.QuickAttack ~= nil,
+        "| CamRot:", Remotes.CamRot ~= nil)
+end)
+
+-- ════════════════════════════════════════════════════════════════
+-- CONFIG STATE
+-- ════════════════════════════════════════════════════════════════
+local Cfg = {
+    Aimbot = {
+        Enabled     = false,
+        FOV         = 150,
+        Smooth      = 0.15,
+        TargetPart  = "Head",
+        TargetLock  = false,
+        LockedTarget= nil,
+        Prediction  = 0.08,   -- seconds of velocity prediction
+    },
+    SilentAim = {
+        Enabled     = false,
+        FOV         = 180,
+        Manipulate  = false,
+    },
+    TriggerBot = {
+        Enabled     = false,
+        Delay       = 0.05,
+    },
+    Ragebot = {
+        Enabled         = false,
+        Mode            = "Gun",       -- "Gun" | "Melee" | "Auto"
+        Priority        = "Closest",   -- "Closest" | "LowHP" | "Visible"
+        ShootAttempts   = 3,
+        AutoFire        = true,
+        VoidSpamHide    = false,
+        HitboxHead      = true,
+        HitboxBody      = true,
+        AutoWeapon      = false,       -- auto-switch to best weapon
+        RapidFire       = false,       -- burst multiple UseItem per frame
+        RapidFireCount  = 2,
+        Backstab        = false,       -- aim at back of target
+        Desync          = false,       -- Kicia desync: teleport server CFrame far
+        BacktrackMs     = 150,         -- ms of backtrack window
+        FireRate        = 0.05,        -- seconds between shots
+    },
+    Visuals = {
+        ESP         = false,
+        NameTags    = false,
+        HealthBars  = false,
+        Chams       = false,
+        Snaplines   = false,
+        Fullbright  = false,
+        NoFog       = false,
+        FOVCircle   = false,
+        TracerColor = Color3.fromRGB(80, 255, 160),
+        BoxColor    = Color3.fromRGB(80, 255, 160),
+    },
+    Movement = {
+        WalkSpeed   = 16,
+        JumpPower   = 50,
+        InfJump     = false,
+        Noclip      = false,
+        Fly         = false,
+        FlySpeed    = 50,
+        NoFall      = false,
+        SlideBoost  = false,          -- slam sprint speed on slide input
+        SlideSpeed  = 90,
+        BunnyHop    = false,          -- auto-jump on land
+    },
+    Misc = {
+        AntiAFK     = false,
+        SpinBot     = false,
+        SpinSpeed   = 20,
+    },
+}
+
+-- ════════════════════════════════════════════════════════════════
+-- BACKTRACK BUFFER  (Kicia-style: ring buffer of past root CFrames)
+-- ════════════════════════════════════════════════════════════════
+local BacktrackBuffer = {}   -- [player] = { {cf, t}, ... }
+local BT_MAX_MS = 400
+
+local function btPush(p)
+    local char = p.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local now = os.clock()
+    local buf = BacktrackBuffer[p]
+    if not buf then buf = {}; BacktrackBuffer[p] = buf end
+    table.insert(buf, { cf = root.CFrame, t = now })
+    -- prune old entries
+    local cutoff = now - (BT_MAX_MS / 1000)
+    while buf[1] and buf[1].t < cutoff do table.remove(buf, 1) end
+end
+
+local function btBest(p)
+    -- return the CFrame entry within the configured window, prefer furthest back
+    local buf = BacktrackBuffer[p]
+    if not buf or #buf == 0 then return nil end
+    local now = os.clock()
+    local window = Cfg.Ragebot.BacktrackMs / 1000
+    for i = #buf, 1, -1 do
+        if (now - buf[i].t) <= window then return buf[i].cf end
+    end
+    return nil
+end
+
+RunService.Heartbeat:Connect(function()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= lp then btPush(p) end
+    end
+end)
+
+-- ════════════════════════════════════════════════════════════════
+-- TARGETING UTILS
+-- ════════════════════════════════════════════════════════════════
+local function getLocalRoot()
+    local c = lp.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+local function getAimPart(char, partName)
+    return char:FindFirstChild(partName) or char:FindFirstChild("HumanoidRootPart")
+end
+
+local function screenDist(worldPos)
+    local sp, onScreen = camera:WorldToViewportPoint(worldPos)
+    if not onScreen then return math.huge end
+    local center = camera.ViewportSize / 2
+    return (Vector2.new(sp.X, sp.Y) - center).Magnitude
+end
+
+local function isVisible(part)
+    local origin = camera.CFrame.Position
+    local dir    = (part.Position - origin)
+    local result = workspace:Raycast(origin, dir, RaycastParams.new())
+    if not result then return true end
+    -- visible if the first hit IS the target part or its parent character
+    local hit = result.Instance
+    return hit == part or (hit and hit:IsDescendantOf(part.Parent))
+end
+
+-- velocity-predicted position
+local function predictedPos(part)
+    local vel = part.AssemblyLinearVelocity
+    return part.Position + vel * Cfg.Aimbot.Prediction
+end
+
+-- backstab offset: position behind the target's root
+local function backstabPos(char)
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+    return root.CFrame * CFrame.new(0, 0, 1.5)  -- 1.5 studs behind
+end
+
+local function getBestTarget(fovRadius, partName)
+    local best, bestDist = nil, math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= lp and p.Character then
+            local hum  = p.Character:FindFirstChild("Humanoid")
+            local part = getAimPart(p.Character, partName or "Head")
+            if hum and hum.Health > 0 and part then
+                if Cfg.Ragebot.Priority == "Visible" and not isVisible(part) then continue end
+                local d = screenDist(predictedPos(part))
+                if d < fovRadius and d < bestDist then
+                    bestDist = d; best = part
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function getClosestPlayer()
+    local best, bestDist = nil, math.huge
+    local localRoot = getLocalRoot()
+    if not localRoot then return nil end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= lp and p.Character then
+            local hum  = p.Character:FindFirstChild("Humanoid")
+            local root = p.Character:FindFirstChild("HumanoidRootPart")
+            if hum and hum.Health > 0 and root then
+                local d = (localRoot.Position - root.Position).Magnitude
+                if d < bestDist then bestDist = d; best = p end
+            end
+        end
+    end
+    return best
+end
+
+local function getLowHPPlayer()
+    local best, bestHP = nil, math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= lp and p.Character then
+            local hum = p.Character:FindFirstChild("Humanoid")
+            if hum and hum.Health > 0 and hum.Health < bestHP then
+                bestHP = hum.Health; best = p
+            end
+        end
+    end
+    return best
+end
+
+local function getVisiblePlayer()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= lp and p.Character then
+            local hum  = p.Character:FindFirstChild("Humanoid")
+            local root = p.Character:FindFirstChild("HumanoidRootPart")
+            if hum and hum.Health > 0 and root and isVisible(root) then
+                return p
+            end
+        end
+    end
+    return nil
+end
+
+local function pickTarget()
+    if Cfg.Ragebot.Priority == "LowHP"   then return getLowHPPlayer()
+    elseif Cfg.Ragebot.Priority == "Visible" then return getVisiblePlayer() or getClosestPlayer()
+    else return getClosestPlayer() end
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- AUTO WEAPON SWITCH  (Kicia pattern: scan character tools)
+-- cycles to the first usable tool that isn't currently held
+-- ════════════════════════════════════════════════════════════════
+local function autoWeaponSwitch(char)
+    if not char then return end
+    local hum = char:FindFirstChild("Humanoid")
+    if not hum then return end
+    -- Rivals stores weapons in character; equip first tool that has a Handle
+    for _, tool in ipairs(char:GetChildren()) do
+        if tool:IsA("Tool") and tool:FindFirstChild("Handle") then
+            -- already equipped if it's in the character directly
+            -- re-equip via humanoid to force the server to register it
+            pcall(function() hum:EquipTool(tool) end)
+            return
+        end
+    end
+    -- fallback: check backpack
+    local bp = lp:FindFirstChild("Backpack")
+    if bp then
+        for _, tool in ipairs(bp:GetChildren()) do
+            if tool:IsA("Tool") and tool:FindFirstChild("Handle") then
+                pcall(function() hum:EquipTool(tool) end)
+                return
+            end
+        end
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- CAMERA MANIPULATION  (Kicia-native, no UE remote)
+-- fires UpdateCameraRotation with a spoofed CFrame pointing at target
+-- ════════════════════════════════════════════════════════════════
+local function applyManip(targetPart)
+    if not targetPart then return end
+    local localChar = lp.Character
+    if not localChar then return end
+    local head = localChar:FindFirstChild("Head") or localChar:FindFirstChild("HumanoidRootPart")
+    if not head then return end
+    local aimPos = Cfg.Ragebot.Backstab and backstabPos(targetPart.Parent)
+                   and backstabPos(targetPart.Parent).Position
+                   or predictedPos(targetPart)
+    local dir     = (aimPos - head.Position).Unit
+    local manipCF = CFrame.new(head.Position, head.Position + dir)
+    if Remotes.CamRot then fireRemote(Remotes.CamRot, manipCF) end
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- DESYNC  (Kicia pattern: SetServerCFrame to far coord each frame)
+-- implemented via char CFrame teleport while Desync is active
+-- ════════════════════════════════════════════════════════════════
+local desyncActive = false
+local DESYNC_LIMIT = 2147483646
+local DESYNC_DEAD  = 1147483646
+
+local function farCoord()
+    local m = math.random(DESYNC_DEAD + 1, DESYNC_LIMIT)
+    return math.random(0, 1) == 0 and -m or m
+end
+local function farVec() return Vector3.new(farCoord(), farCoord(), farCoord()) end
+
+local function applyDesync()
+    if not Cfg.Ragebot.Desync then desyncActive = false; return end
+    local localChar = lp.Character
+    local root = localChar and localChar:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    -- fire a camera-rot remote with a far CFrame to desync server hitbox
+    if Remotes.CamRot then
+        pcall(function()
+            Remotes.CamRot:FireServer(CFrame.new(farVec()) * CFrame.Angles(math.pi, math.pi, math.pi))
+        end)
+    end
+    desyncActive = true
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- ESP SYSTEM
+-- ════════════════════════════════════════════════════════════════
+local ESPObjects = {}
+
+local function removeESP(p)
+    if ESPObjects[p] then
+        for _, obj in pairs(ESPObjects[p]) do
+            pcall(function() obj:Remove() end)
+        end
+        ESPObjects[p] = nil
+    end
+end
+
+local function makeESP(p)
+    if not p.Character then return end
+    removeESP(p)
+    local obj = {}
+
+    local box = Drawing.new("Square")
+    box.Visible = false; box.Color = Cfg.Visuals.BoxColor
+    box.Thickness = 1.5; box.Filled = false
+    obj.box = box
+
+    local nametag = Drawing.new("Text")
+    nametag.Visible = false; nametag.Color = Color3.fromRGB(220, 230, 255)
+    nametag.Size = 13; nametag.Center = true; nametag.Outline = true
+    obj.name = nametag
+
+    local hbar = Drawing.new("Square")
+    hbar.Visible = false; hbar.Color = Color3.fromRGB(80, 255, 60)
+    hbar.Filled = true
+    obj.hbar = hbar
+
+    local snap = Drawing.new("Line")
+    snap.Visible = false; snap.Color = Cfg.Visuals.TracerColor
+    snap.Thickness = 1
+    obj.snap = snap
+
+    ESPObjects[p] = obj
+end
+
+local function updateESP()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p == lp then continue end
+        if not ESPObjects[p] then makeESP(p) end
+        local obj  = ESPObjects[p]
+        if not obj then continue end
+        local char = p.Character
+        local hum  = char and char:FindFirstChild("Humanoid")
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not char or not hum or not root or hum.Health <= 0 then
+            for _, o in pairs(obj) do o.Visible = false end
+            continue
+        end
+        local topSP, onTop = camera:WorldToViewportPoint(root.Position + Vector3.new(0, 3.2, 0))
+        local botSP, onBot = camera:WorldToViewportPoint(root.Position - Vector3.new(0, 2.8, 0))
+        if not onTop or not onBot then
+            for _, o in pairs(obj) do o.Visible = false end
+            continue
+        end
+        local height = math.abs(topSP.Y - botSP.Y)
+        local width  = height * 0.5
+        local cx, cy = topSP.X, topSP.Y
+
+        if Cfg.Visuals.ESP and obj.box then
+            obj.box.Position = Vector2.new(cx - width/2, cy)
+            obj.box.Size     = Vector2.new(width, height)
+            obj.box.Visible  = true
+        elseif obj.box then obj.box.Visible = false end
+
+        if Cfg.Visuals.NameTags and obj.name then
+            obj.name.Position = Vector2.new(cx, cy - 14)
+            obj.name.Text     = p.Name .. " [" .. math.floor(hum.Health) .. "]"
+            obj.name.Visible  = true
+        elseif obj.name then obj.name.Visible = false end
+
+        if Cfg.Visuals.HealthBars and obj.hbar then
+            local hp = hum.Health / hum.MaxHealth
+            obj.hbar.Position = Vector2.new(cx - width/2 - 5, cy + height * (1 - hp))
+            obj.hbar.Size     = Vector2.new(3, height * hp)
+            obj.hbar.Visible  = true
+        elseif obj.hbar then obj.hbar.Visible = false end
+
+        if Cfg.Visuals.Snaplines and obj.snap then
+            obj.snap.From    = camera.ViewportSize / 2
+            obj.snap.To      = Vector2.new(topSP.X, topSP.Y)
+            obj.snap.Visible = true
+        elseif obj.snap then obj.snap.Visible = false end
+    end
+end
+
+Players.PlayerRemoving:Connect(removeESP)
+
+-- ════════════════════════════════════════════════════════════════
+-- CHAMS
+-- ════════════════════════════════════════════════════════════════
+local ChamObjects = {}
+
+local function applyChams(p)
+    if not p.Character then return end
+    ChamObjects[p] = ChamObjects[p] or {}
+    for _, part in ipairs(p.Character:GetDescendants()) do
+        if part:IsA("BasePart") and not ChamObjects[p][part] then
+            local hl = Instance.new("SelectionBox")
+            hl.Adornee           = part
+            hl.Color3            = Color3.fromRGB(80, 255, 160)
+            hl.LineThickness     = 0.03
+            hl.SurfaceTransparency = 0.6
+            hl.Parent            = part
+            ChamObjects[p][part] = hl
+        end
+    end
+end
+
+local function removeChams(p)
+    if ChamObjects[p] then
+        for _, hl in pairs(ChamObjects[p]) do
+            pcall(function() hl:Destroy() end)
+        end
+        ChamObjects[p] = nil
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- FOV CIRCLE
+-- ════════════════════════════════════════════════════════════════
+local fovCircle = Drawing.new("Circle")
+fovCircle.Visible = false; fovCircle.Thickness = 1
+fovCircle.Color = Color3.fromRGB(80, 255, 160)
+fovCircle.Filled = false; fovCircle.Transparency = 0.5
+
+-- ════════════════════════════════════════════════════════════════
+-- MOVEMENT
+-- ════════════════════════════════════════════════════════════════
+local flyBody       = nil
+local slideBoosting = false
+
+local function setFly(state)
+    local char = lp.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    if state then
+        local bg = Instance.new("BodyGyro")
+        bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+        bg.D = 100; bg.P = 1e4; bg.Parent = root
+        local bv = Instance.new("BodyVelocity")
+        bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+        bv.Velocity = Vector3.zero; bv.Parent = root
+        flyBody = { bg = bg, bv = bv }
+    else
+        if flyBody then
+            pcall(function() flyBody.bg:Destroy() end)
+            pcall(function() flyBody.bv:Destroy() end)
+            flyBody = nil
+        end
+    end
+end
+
+local function applyMovementStats()
+    local char = lp.Character
+    local hum  = char and char:FindFirstChild("Humanoid")
+    if hum then
+        hum.WalkSpeed = Cfg.Movement.WalkSpeed
+        hum.JumpPower = Cfg.Movement.JumpPower
+    end
+end
+
+-- slide boost: slam WalkSpeed on LeftShift down, restore on up
+UserInputService.InputBegan:Connect(function(inp, proc)
+    if proc then return end
+    if inp.KeyCode == Enum.KeyCode.LeftShift and Cfg.Movement.SlideBoost then
+        local char = lp.Character
+        local hum  = char and char:FindFirstChild("Humanoid")
+        if hum then hum.WalkSpeed = Cfg.Movement.SlideSpeed; slideBoosting = true end
+    end
+end)
+UserInputService.InputEnded:Connect(function(inp)
+    if inp.KeyCode == Enum.KeyCode.LeftShift and slideBoosting then
+        slideBoosting = false
+        applyMovementStats()
+    end
+end)
+
+-- fullbright / fog
+local origAmbient    = Lighting.Ambient
+local origBrightness = Lighting.Brightness
+
+local function applyFullbright(state)
+    if state then
+        Lighting.Ambient    = Color3.fromRGB(255, 255, 255)
+        Lighting.Brightness = 2
+        Lighting.FogEnd     = 1e6
+    else
+        Lighting.Ambient    = origAmbient
+        Lighting.Brightness = origBrightness
+    end
+end
+
+local function applyNoFog(state)
+    Lighting.FogEnd = state and 1e6 or 100000
+end
+
+-- ════════════════════════════════════════════════════════════════
+-- SPINBOT  (pure visual server-side anti — just rotates local root)
+-- ════════════════════════════════════════════════════════════════
+local spinAngle = 0
+
+-- ════════════════════════════════════════════════════════════════
+-- ANTI AFK
+-- ════════════════════════════════════════════════════════════════
+lp.Idled:Connect(function()
+    if not Cfg.Misc.AntiAFK then return end
+    VirtualUser:Button2Down(Vector2.zero, camera.CFrame)
+    task.wait(1)
+    VirtualUser:Button2Up(Vector2.zero, camera.CFrame)
+end)
+
+-- ════════════════════════════════════════════════════════════════
+-- RAGEBOT STATE
+-- ════════════════════════════════════════════════════════════════
+local RageState = { lastFire = 0, lastTrigger = 0 }
+
+-- ════════════════════════════════════════════════════════════════
+-- HEARTBEAT — all per-frame logic
+-- ════════════════════════════════════════════════════════════════
+RunService.Heartbeat:Connect(function(dt)
+    local now = os.clock()
+
+    -- ── AIMBOT ───────────────────────────────────────────────────
+    if Cfg.Aimbot.Enabled then
+        local target
+        if Cfg.Aimbot.TargetLock and Cfg.Aimbot.LockedTarget then
+            local c = Cfg.Aimbot.LockedTarget.Character
+            target  = c and getAimPart(c, Cfg.Aimbot.TargetPart)
+        else
+            target = getBestTarget(Cfg.Aimbot.FOV, Cfg.Aimbot.TargetPart)
+        end
+        if target then
+            local aimPos = predictedPos(target)
+            local sp     = camera:WorldToViewportPoint(aimPos)
+            local center = camera.ViewportSize / 2
+            local delta  = Vector2.new(sp.X, sp.Y) - center
+            local smooth = math.clamp(1 - Cfg.Aimbot.Smooth, 0.01, 1)
+            if mousemoverel_ then
+                pcall(mousemoverel_, delta.X * smooth, delta.Y * smooth)
+            end
+            if Cfg.SilentAim.Manipulate then applyManip(target) end
+        end
+    end
+
+    -- ── SILENT AIM ───────────────────────────────────────────────
+    if Cfg.SilentAim.Enabled then
+        local target = getBestTarget(Cfg.SilentAim.FOV, Cfg.Aimbot.TargetPart)
+        if target and Cfg.SilentAim.Manipulate then applyManip(target) end
+    end
+
+    -- ── TRIGGERBOT ───────────────────────────────────────────────
+    if Cfg.TriggerBot.Enabled and (now - RageState.lastTrigger) > Cfg.TriggerBot.Delay then
+        local target = getBestTarget(60, Cfg.Aimbot.TargetPart)
+        if target then
+            if Remotes.UseItem then fireRemote(Remotes.UseItem) end
+            RageState.lastTrigger = now
+        end
+    end
+
+    -- ── RAGEBOT (Kicia-native) ────────────────────────────────────
+    if Cfg.Ragebot.Enabled and (now - RageState.lastFire) > Cfg.Ragebot.FireRate then
+        local targetPlayer = pickTarget()
+        if targetPlayer and targetPlayer.Character then
+            local char    = targetPlayer.Character
+            local aimPart = getAimPart(char, Cfg.Ragebot.HitboxHead and "Head" or "HumanoidRootPart")
+
+            -- backtrack: ghost to recorded position
+            local btCF = btBest(targetPlayer)
+            local btPart = char:FindFirstChild("HumanoidRootPart")
+            if btCF and btPart then
+                -- fire at the backtracked position via cam manip
+                local head = lp.Character and lp.Character:FindFirstChild("Head")
+                if head and Remotes.CamRot then
+                    local dir = (btCF.Position - head.Position).Unit
+                    pcall(function()
+                        Remotes.CamRot:FireServer(CFrame.new(head.Position, head.Position + dir))
+                    end)
+                end
+            else
+                applyManip(aimPart)
+            end
+
+            -- desync
+            if Cfg.Ragebot.Desync then applyDesync() end
+
+            -- auto weapon switch before firing
+            if Cfg.Ragebot.AutoWeapon then
+                autoWeaponSwitch(lp.Character)
+            end
+
+            -- fire
+            if Cfg.Ragebot.AutoFire then
+                local shots = Cfg.Ragebot.RapidFire
+                    and math.clamp(Cfg.Ragebot.RapidFireCount, 1, 5)
+                    or  math.clamp(Cfg.Ragebot.ShootAttempts,  1, 10)
+                for _ = 1, shots do
+                    if Cfg.Ragebot.Mode == "Gun" or Cfg.Ragebot.Mode == "Auto" then
+                        if Remotes.UseItem then fireRemote(Remotes.UseItem) end
+                    end
+                    if Cfg.Ragebot.Mode == "Melee" or Cfg.Ragebot.Mode == "Auto" then
+                        if Remotes.QuickAttack then fireRemote(Remotes.QuickAttack) end
+                    end
+                end
+            end
+
+            -- void spam hide: teleport local char root far then back
+            if Cfg.Ragebot.VoidSpamHide then
+                local localRoot = getLocalRoot()
+                if localRoot then
+                    local origCF = localRoot.CFrame
+                    pcall(function() localRoot.CFrame = CFrame.new(0, -1e4, 0) end)
+                    task.defer(function() pcall(function() localRoot.CFrame = origCF end) end)
+                end
+            end
+
+            RageState.lastFire = now
+        end
+    end
+
+    -- ── ESP UPDATE ───────────────────────────────────────────────
+    local anyVisual = Cfg.Visuals.ESP or Cfg.Visuals.NameTags
+        or Cfg.Visuals.HealthBars or Cfg.Visuals.Snaplines
+    if anyVisual then
+        updateESP()
+    else
+        for _, obj in pairs(ESPObjects) do
+            for _, o in pairs(obj) do o.Visible = false end
+        end
+    end
+
+    -- ── FOV CIRCLE ───────────────────────────────────────────────
+    if Cfg.Visuals.FOVCircle then
+        local r = Cfg.SilentAim.Enabled and Cfg.SilentAim.FOV
+            or (Cfg.Aimbot.Enabled and Cfg.Aimbot.FOV or 150)
+        fovCircle.Position = camera.ViewportSize / 2
+        fovCircle.Radius   = r
+        fovCircle.Visible  = true
+    else
+        fovCircle.Visible = false
+    end
+
+    -- ── FLY ──────────────────────────────────────────────────────
+    if Cfg.Movement.Fly and flyBody then
+        local cf  = camera.CFrame
+        local vel = Vector3.zero
+        local spd = Cfg.Movement.FlySpeed
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then vel = vel + cf.LookVector  * spd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then vel = vel - cf.LookVector  * spd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then vel = vel - cf.RightVector * spd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then vel = vel + cf.RightVector * spd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space)       then vel = vel + Vector3.new(0, spd, 0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then vel = vel - Vector3.new(0, spd, 0) end
+        flyBody.bv.Velocity = vel
+        flyBody.bg.CFrame   = cf
+    end
+
+    -- ── SPINBOT ───────────────────────────────────────────────────
+    if Cfg.Misc.SpinBot then
+        local localRoot = getLocalRoot()
+        if localRoot then
+            spinAngle = (spinAngle + Cfg.Misc.SpinSpeed) % 360
+            local orig = localRoot.CFrame
+            pcall(function()
+                localRoot.CFrame = CFrame.new(orig.Position)
+                    * CFrame.Angles(0, math.rad(spinAngle), 0)
+            end)
+        end
+    end
+end)
+
+-- ── NOCLIP ───────────────────────────────────────────────────────
+RunService.Stepped:Connect(function()
+    if not Cfg.Movement.Noclip then return end
+    local char = lp.Character
+    if not char then return end
+    for _, p in ipairs(char:GetDescendants()) do
+        if p:IsA("BasePart") then p.CanCollide = false end
+    end
+end)
+
+-- ── INF JUMP + BUNNY HOP ─────────────────────────────────────────
+UserInputService.JumpRequest:Connect(function()
+    if not Cfg.Movement.InfJump then return end
+    local hum = lp.Character and lp.Character:FindFirstChild("Humanoid")
+    if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+end)
+
+local function onStateChange(_, new)
+    if new == Enum.HumanoidStateType.Landed and Cfg.Movement.BunnyHop then
+        local hum = lp.Character and lp.Character:FindFirstChild("Humanoid")
+        if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end
+end
+
+lp.CharacterAdded:Connect(function(char)
+    applyMovementStats()
+    setFly(false)
+    local hum = char:WaitForChild("Humanoid")
+    hum.StateChanged:Connect(onStateChange)
+end)
+if lp.Character then
+    local hum = lp.Character:FindFirstChild("Humanoid")
+    if hum then hum.StateChanged:Connect(onStateChange) end
+end
+
+-- ══════════════════════════════════════════════════════════════════
+-- LINORIA UI
+-- ══════════════════════════════════════════════════════════════════
+local Window = Library:CreateWindow({
+    Title        = "KRYPTONITE.WIN v5",
+    Center       = true,
+    AutoShow     = true,
+    TabPadding   = 8,
+    MenuFadeTime = 0.2,
+})
+
+-- Mobile floating button
+if isMobile then
+    local pg  = lp:WaitForChild("PlayerGui")
+    local sg  = Instance.new("ScreenGui", pg)
+    sg.Name = "KYR_MobileBtn"; sg.ResetOnSpawn = false
+    sg.IgnoreGuiInset = true
+    local btn = Instance.new("TextButton", sg)
+    btn.Size            = UDim2.fromOffset(60, 60)
+    btn.Position        = UDim2.new(1, -76, 1, -76)
+    btn.AnchorPoint     = Vector2.new(1, 1)
+    btn.BackgroundColor3= Color3.fromRGB(14, 15, 18)
+    btn.TextColor3      = Color3.fromRGB(80, 255, 160)
+    btn.Text            = "KYR"
+    btn.TextSize        = 14
+    btn.Font            = Enum.Font.GothamBold
+    btn.AutoButtonColor = false
+    Instance.new("UICorner",  btn).CornerRadius = UDim.new(0, 30)
+    Instance.new("UIStroke",  btn).Color        = Color3.fromRGB(80, 255, 160)
+    btn.MouseButton1Click:Connect(function() Library:ToggleUI() end)
+end
+
+local Tabs = {
+    Aimbot   = Window:CreateTab("Aimbot",    "crosshair"),
+    Rage     = Window:CreateTab("Rage",      "skull"),
+    Visuals  = Window:CreateTab("Visuals",   "eye"),
+    Movement = Window:CreateTab("Movement",  "wind"),
+    Misc     = Window:CreateTab("Misc",      "settings"),
+    Config   = Window:CreateTab("Config",    "save"),
+}
+
+-- ── AIMBOT TAB ───────────────────────────────────────────────────
+local AimGroup = Tabs.Aimbot:CreateGroup("Aimbot")
+
+AimGroup:CreateToggle({
+    Name = "Aimbot", Default = false,
+    Callback = function(v) Cfg.Aimbot.Enabled = v end,
+}):AddKeyPick(Enum.KeyCode.Unknown, { Text = "Aimbot Key" })
+
+AimGroup:CreateSlider({
+    Name = "FOV", Range = {5,500}, Increment = 5, Default = 150,
+    Callback = function(v) Cfg.Aimbot.FOV = v end,
+})
+AimGroup:CreateSlider({
+    Name = "Smoothness", Range = {0,100}, Increment = 1, Default = 15, Suffix = "%",
+    Callback = function(v) Cfg.Aimbot.Smooth = v / 100 end,
+})
+AimGroup:CreateSlider({
+    Name = "Prediction (ms)", Range = {0,300}, Increment = 5, Default = 80,
+    Callback = function(v) Cfg.Aimbot.Prediction = v / 1000 end,
+})
+AimGroup:CreateDropdown({
+    Name = "Target Part", Options = {"Head","Torso","HumanoidRootPart"},
+    Default = "Head",
+    Callback = function(v) Cfg.Aimbot.TargetPart = v end,
+})
+AimGroup:CreateToggle({
+    Name = "Target Lock", Default = false,
+    Callback = function(v) Cfg.Aimbot.TargetLock = v end,
+})
+
+local SilentGroup = Tabs.Aimbot:CreateGroup("Silent Aim + Manipulation")
+SilentGroup:CreateToggle({
+    Name = "Silent Aim", Default = false,
+    Callback = function(v) Cfg.SilentAim.Enabled = v end,
+}):AddKeyPick(Enum.KeyCode.Unknown, { Text = "Silent Aim Key" })
+SilentGroup:CreateSlider({
+    Name = "Silent Aim FOV", Range = {5,500}, Increment = 5, Default = 180,
+    Callback = function(v) Cfg.SilentAim.FOV = v end,
+})
+SilentGroup:CreateToggle({
+    Name = "Camera Manipulation", Default = false,
+    Callback = function(v)
+        Cfg.SilentAim.Manipulate = v
+        Library:Notify("Manipulation " .. (v and "ARMED" or "OFF"), 2)
+    end,
+})
+
+local TrigGroup = Tabs.Aimbot:CreateGroup("Triggerbot")
+TrigGroup:CreateToggle({
+    Name = "Triggerbot", Default = false,
+    Callback = function(v) Cfg.TriggerBot.Enabled = v end,
+})
+TrigGroup:CreateSlider({
+    Name = "Fire Delay", Range = {0,500}, Increment = 10, Default = 50, Suffix = "ms",
+    Callback = function(v) Cfg.TriggerBot.Delay = v / 1000 end,
+})
+
+-- ── RAGE TAB ─────────────────────────────────────────────────────
+local RageGroup = Tabs.Rage:CreateGroup("Kicia Ragebot")
+
+RageGroup:CreateToggle({
+    Name = "Ragebot", Default = false,
+    Callback = function(v)
+        Cfg.Ragebot.Enabled = v
+        Library:Notify("Ragebot " .. (v and "ARMED" or "OFF"), 2)
+    end,
+}):AddKeyPick(Enum.KeyCode.Unknown, { Text = "Rage Key" })
+
+RageGroup:CreateToggle({
+    Name = "Auto-Fire", Default = true,
+    Callback = function(v) Cfg.Ragebot.AutoFire = v end,
+})
+RageGroup:CreateToggle({
+    Name = "Auto Weapon Switch", Default = false,
+    Callback = function(v) Cfg.Ragebot.AutoWeapon = v end,
+})
+RageGroup:CreateToggle({
+    Name = "Rapid Fire", Default = false,
+    Callback = function(v) Cfg.Ragebot.RapidFire = v end,
+})
+RageGroup:CreateSlider({
+    Name = "Rapid Fire Burst", Range = {1,5}, Increment = 1, Default = 2,
+    Callback = function(v) Cfg.Ragebot.RapidFireCount = v end,
+})
+RageGroup:CreateSlider({
+    Name = "Shoot Attempts", Range = {1,10}, Increment = 1, Default = 3,
+    Callback = function(v) Cfg.Ragebot.ShootAttempts = v end,
+})
+RageGroup:CreateSlider({
+    Name = "Fire Rate (ms)", Range = {10,500}, Increment = 5, Default = 50,
+    Callback = function(v) Cfg.Ragebot.FireRate = v / 1000 end,
+})
+RageGroup:CreateDropdown({
+    Name = "Mode", Options = {"Gun","Melee","Auto"}, Default = "Gun",
+    Callback = function(v) Cfg.Ragebot.Mode = v end,
+})
+RageGroup:CreateDropdown({
+    Name = "Priority", Options = {"Closest","LowHP","Visible"}, Default = "Closest",
+    Callback = function(v) Cfg.Ragebot.Priority = v end,
+})
+RageGroup:CreateSlider({
+    Name = "Backtrack Window (ms)", Range = {0,400}, Increment = 10, Default = 150,
+    Callback = function(v) Cfg.Ragebot.BacktrackMs = v; BT_MAX_MS = v end,
+})
+RageGroup:CreateToggle({
+    Name = "Backstab Angle", Default = false,
+    Callback = function(v) Cfg.Ragebot.Backstab = v end,
+})
+RageGroup:CreateToggle({
+    Name = "Desync", Default = false,
+    Callback = function(v)
+        Cfg.Ragebot.Desync = v
+        Library:Notify("Desync " .. (v and "ON" or "OFF"), 2)
+    end,
+})
+RageGroup:CreateToggle({
+    Name = "Void Spam Hide", Default = false,
+    Callback = function(v) Cfg.Ragebot.VoidSpamHide = v end,
+})
+
+local HBGroup = Tabs.Rage:CreateGroup("Hitboxes")
+HBGroup:CreateToggle({
+    Name = "Head Hitbox", Default = true,
+    Callback = function(v) Cfg.Ragebot.HitboxHead = v end,
+})
+HBGroup:CreateToggle({
+    Name = "Body Hitbox", Default = true,
+    Callback = function(v) Cfg.Ragebot.HitboxBody = v end,
+})
+
+-- ── VISUALS TAB ──────────────────────────────────────────────────
+local ESPGroup = Tabs.Visuals:CreateGroup("ESP")
+ESPGroup:CreateToggle({ Name="ESP Boxes",    Default=false, Callback=function(v) Cfg.Visuals.ESP=v end })
+ESPGroup:CreateToggle({ Name="Name Tags",    Default=false, Callback=function(v) Cfg.Visuals.NameTags=v end })
+ESPGroup:CreateToggle({ Name="Health Bars",  Default=false, Callback=function(v) Cfg.Visuals.HealthBars=v end })
+ESPGroup:CreateToggle({ Name="Snaplines",    Default=false, Callback=function(v) Cfg.Visuals.Snaplines=v end })
+ESPGroup:CreateToggle({
+    Name="Chams", Default=false,
+    Callback=function(v)
+        Cfg.Visuals.Chams = v
+        if v then
+            for _, p in ipairs(Players:GetPlayers()) do if p ~= lp then applyChams(p) end end
+        else
+            for _, p in ipairs(Players:GetPlayers()) do removeChams(p) end
+        end
+    end,
+})
+ESPGroup:CreateToggle({ Name="FOV Circle", Default=false, Callback=function(v) Cfg.Visuals.FOVCircle=v end })
+
+local WorldGroup = Tabs.Visuals:CreateGroup("World")
+WorldGroup:CreateToggle({
+    Name="Fullbright", Default=false,
+    Callback=function(v) Cfg.Visuals.Fullbright=v; applyFullbright(v) end,
+})
+WorldGroup:CreateToggle({
+    Name="Remove Fog", Default=false,
+    Callback=function(v) Cfg.Visuals.NoFog=v; applyNoFog(v) end,
+})
+
+-- ── MOVEMENT TAB ─────────────────────────────────────────────────
+local MovGroup = Tabs.Movement:CreateGroup("Movement")
+MovGroup:CreateSlider({
+    Name="Walk Speed", Range={16,250}, Increment=1, Default=16, Suffix="u/s",
+    Callback=function(v) Cfg.Movement.WalkSpeed=v; applyMovementStats() end,
+})
+MovGroup:CreateSlider({
+    Name="Jump Power", Range={50,350}, Increment=5, Default=50,
+    Callback=function(v) Cfg.Movement.JumpPower=v; applyMovementStats() end,
+})
+MovGroup:CreateToggle({ Name="Infinite Jump", Default=false, Callback=function(v) Cfg.Movement.InfJump=v end })
+MovGroup:CreateToggle({ Name="Bunny Hop",     Default=false, Callback=function(v) Cfg.Movement.BunnyHop=v end })
+MovGroup:CreateToggle({ Name="Noclip",        Default=false, Callback=function(v) Cfg.Movement.Noclip=v end })
+MovGroup:CreateToggle({
+    Name="Fly", Default=false,
+    Callback=function(v) Cfg.Movement.Fly=v; setFly(v) end,
+})
+MovGroup:CreateSlider({
+    Name="Fly Speed", Range={10,200}, Increment=5, Default=50,
+    Callback=function(v) Cfg.Movement.FlySpeed=v end,
+})
+MovGroup:CreateToggle({ Name="No Fall Damage", Default=false, Callback=function(v) Cfg.Movement.NoFall=v end })
+
+local SlideGroup = Tabs.Movement:CreateGroup("Slide Boost")
+SlideGroup:CreateToggle({
+    Name="Slide Boost (LeftShift)", Default=false,
+    Callback=function(v) Cfg.Movement.SlideBoost=v end,
+})
+SlideGroup:CreateSlider({
+    Name="Slide Speed", Range={20,300}, Increment=5, Default=90, Suffix="u/s",
+    Callback=function(v) Cfg.Movement.SlideSpeed=v end,
+})
+
+-- ── MISC TAB ─────────────────────────────────────────────────────
+local MiscGroup = Tabs.Misc:CreateGroup("Misc")
+MiscGroup:CreateToggle({ Name="Anti-AFK", Default=false, Callback=function(v) Cfg.Misc.AntiAFK=v end })
+MiscGroup:CreateToggle({
+    Name="SpinBot", Default=false,
+    Callback=function(v) Cfg.Misc.SpinBot=v end,
+})
+MiscGroup:CreateSlider({
+    Name="Spin Speed", Range={1,50}, Increment=1, Default=20,
+    Callback=function(v) Cfg.Misc.SpinSpeed=v end,
+})
+MiscGroup:CreateButton({
+    Name="Rejoin",
+    Callback=function() TeleportService:Teleport(game.PlaceId, lp) end,
+})
+MiscGroup:CreateButton({
+    Name="Server Hop",
+    Callback=function()
+        local ok, servers = pcall(function()
+            return HttpService:JSONDecode(
+                game:HttpGet("https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/Public?limit=100"))
+        end)
+        if ok and servers and servers.data then
+            for _, s in ipairs(servers.data) do
+                if s.id ~= game.JobId and s.playing < s.maxPlayers then
+                    TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, lp)
+                    return
+                end
+            end
+        end
+        Library:Notify("No server found", 2)
+    end,
+})
+
+-- ── CONFIG TAB ───────────────────────────────────────────────────
+SaveManager:SetLibrary(Library)
+ThemeManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetFolder("kryptonite_win_v5")
+SaveManager:BuildConfigSection(Tabs.Config)
+ThemeManager:BuildThemeSection(Tabs.Config)
+
+-- ── UNLOAD ────────────────────────────────────────────────────────
+Library:OnUnload(function()
+    setFly(false)
+    applyFullbright(false)
+    applyNoFog(false)
+    fovCircle:Remove()
+    for _, p in ipairs(Players:GetPlayers()) do
+        removeESP(p); removeChams(p)
+    end
+end)
+
+-- ── KEYBIND ──────────────────────────────────────────────────────
+UserInputService.InputBegan:Connect(function(inp, proc)
+    if not proc and inp.KeyCode == Enum.KeyCode.RightShift then
+        Library:ToggleUI()
+    end
+end)
+
+-- ── BOOT ─────────────────────────────────────────────────────────
+SaveManager:LoadAutoloadConfig()
+Library:Notify("KRYPTONITE.WIN v5.0 — Kicia native loaded", 3)
+Library:Notify("RShift toggle | no UE dependency", 2)
